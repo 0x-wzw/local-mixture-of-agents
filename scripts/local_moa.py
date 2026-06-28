@@ -15,6 +15,64 @@ import aiohttp
 import sys
 from typing import List, Optional
 
+# ── K2-Backbone Integration (optional) ─────────────────────────────────────
+# MoARouter provides dynamic model selection via K2's capability matrix.
+# Falls back gracefully when K2 is not installed.
+
+try:
+    from k2_backbone.router.moa_router import MoARouter
+    _K2_AVAILABLE = True
+except ImportError:
+    _K2_AVAILABLE = False
+
+
+# Lazy-initialised MoARouter singleton (one instance per process).
+_K2_ROUTER: Optional[object] = None
+
+
+def get_k2_routed_models(
+    task_type: str = "analysis",
+    budget: str = "balanced",
+    diversity: int = 4,
+) -> tuple[list[str], str]:
+    """
+    Query the K2 MoARouter for dynamically selected reference models and
+    the best aggregator model for the given task type and budget.
+
+    Args:
+        task_type: Task type key ("code", "analysis", "research", etc.).
+        budget:    "quality_first", "balanced", or "cost_first".
+        diversity: Number of architecturally diverse reference models.
+
+    Returns:
+        (reference_models, aggregator_model) — a tuple of model ID lists.
+
+    Falls back to the hardcoded defaults when K2 is unavailable.
+    """
+    global _K2_ROUTER
+
+    if not _K2_AVAILABLE:
+        print(
+            "ℹ️  K2-Backbone not available; using hardcoded MoA defaults.",
+            file=sys.stderr,
+        )
+        return REFERENCE_MODELS, AGGREGATOR_MODEL
+
+    if _K2_ROUTER is None:
+        _K2_ROUTER = MoARouter()
+
+    refs = _K2_ROUTER.select_reference_models(
+        task_type=task_type, count=diversity, budget=budget
+    )
+    agg = _K2_ROUTER.select_aggregator(task_type=task_type, budget=budget)
+
+    print(
+        f"🔹 K2-Routed: {len(refs)} reference models ({', '.join(refs)}), "
+        f"aggregator: {agg}",
+        file=sys.stderr,
+    )
+    return refs, agg
+
 # ── Endpoint ──────────────────────────────────────────────────────────────
 # Override at runtime via OLLAMA_BASE_URL env var if needed.
 OLLAMA_URL = os.environ.get("OLLAMA_BASE_URL", "https://ollama.com/v1") + "/chat/completions"
@@ -170,7 +228,10 @@ async def run_aggregator(
 async def mixture_of_agents_local(
     user_prompt: str,
     reference_models: Optional[List[str]] = None,
-    aggregator_model: Optional[str] = None
+    aggregator_model: Optional[str] = None,
+    use_k2_routing: bool = False,
+    task_type: str = "analysis",
+    budget: str = "balanced",
 ) -> dict:
     """
     Run Ollama Cloud MoA pipeline.
@@ -195,6 +256,14 @@ async def mixture_of_agents_local(
             "reference_count": 0,
             "processing_time": 0.0
         }
+
+    # Resolve models via K2 routing when requested and no explicit models given
+    if use_k2_routing and reference_models is None:
+        ref_models, agg_model = get_k2_routed_models(
+            task_type=task_type, budget=budget, diversity=4
+        )
+        reference_models = ref_models
+        aggregator_model = aggregator_model or agg_model
 
     async with aiohttp.ClientSession() as session:
         # Layer 1: Parallel references
