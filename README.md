@@ -80,10 +80,22 @@ python scripts/local_moa.py "<prompt>" [options]
   --refs MODEL1,MODEL2,...   Reference models (mode-specific defaults)
   --agg MODEL                Aggregator model (mode-specific default)
   --max-conc N               Max parallel calls (default: 4)
+  --timeout N                Per-request timeout in seconds (default: 120)
   --k2                       Enable K2-Backbone dynamic routing
   --task-type TYPE           Task type for K2 routing
   --budget {quality_first,balanced,cost_first}  Budget mode for K2
   --debug                    Enable verbose debug logging
+  --list-models              List available models and exit
+```
+
+### List available models
+
+```bash
+# Cloud models
+python scripts/local_moa.py --mode cloud --list-models
+
+# Local models
+python scripts/local_moa.py --mode local --list-models
 ```
 
 ## Environment Variables
