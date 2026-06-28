@@ -77,16 +77,23 @@ def get_k2_routed_models(
 
 
 # ── Mode & Endpoint ────────────────────────────────────────────────────────
-MODE = os.environ.get("MOA_MODE", "local").strip().lower()
-if MODE not in ("local", "cloud"):
-    raise ValueError(f"MOA_MODE must be 'local' or 'cloud', got '{MODE}'")
+_INITIAL_MODE = os.environ.get("MOA_MODE", "local").strip().lower()
+if _INITIAL_MODE not in ("local", "cloud"):
+    raise ValueError(f"MOA_MODE must be 'local' or 'cloud', got '{_INITIAL_MODE}'")
+
+MODE = _INITIAL_MODE
 
 LOCAL_URL = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434/v1/chat/completions")
 LOCAL_TAGS_URL = os.environ.get("OLLAMA_TAGS_URL", "http://127.0.0.1:11434/api/tags")
 CLOUD_BASE = os.environ.get("OLLAMA_BASE_URL", "https://ollama.com/v1")
 CLOUD_URL = f"{CLOUD_BASE}/chat/completions"
+CLOUD_MODELS_URL = f"{CLOUD_BASE}/models"
 
-OLLAMA_URL = CLOUD_URL if MODE == "cloud" else LOCAL_URL
+def _get_ollama_url() -> str:
+    """Resolve endpoint URL based on current MODE (may change at runtime via CLI)."""
+    return CLOUD_URL if MODE == "cloud" else LOCAL_URL
+
+OLLAMA_URL = _get_ollama_url()
 
 # ── API Key (cloud only) ──────────────────────────────────────────────────
 def _load_api_key() -> str:
@@ -110,22 +117,33 @@ def _load_api_key() -> str:
 API_KEY = _load_api_key()
 
 # ── Defaults by mode ───────────────────────────────────────────────────────
-if MODE == "cloud":
-    REFERENCE_MODELS = [
-        "qwen3-coder:480b",
-        "kimi-k2.6",
-        "deepseek-v4-flash",
-        "gemma4:31b",
-    ]
-    AGGREGATOR_MODEL = "deepseek-v4-flash"
-else:
-    REFERENCE_MODELS = [
-        "llama3.3",
-        "qwen2.5",
-        "mistral",
-        "phi4",
-    ]
-    AGGREGATOR_MODEL = "llama3.3"
+CLOUD_REFERENCE_MODELS = [
+    "qwen3-coder:480b",
+    "kimi-k2.6",
+    "deepseek-v4-flash",
+    "gemma4:31b",
+]
+CLOUD_AGGREGATOR_MODEL = "deepseek-v4-flash"
+
+LOCAL_REFERENCE_MODELS = [
+    "llama3.3",
+    "qwen2.5",
+    "mistral",
+    "phi4",
+]
+LOCAL_AGGREGATOR_MODEL = "llama3.3"
+
+def _get_reference_models() -> list:
+    """Resolve default reference models based on current MODE."""
+    return CLOUD_REFERENCE_MODELS if MODE == "cloud" else LOCAL_REFERENCE_MODELS
+
+def _get_aggregator_model() -> str:
+    """Resolve default aggregator model based on current MODE."""
+    return CLOUD_AGGREGATOR_MODEL if MODE == "cloud" else LOCAL_AGGREGATOR_MODEL
+
+# Module-level defaults (evaluate at import time; use _get_* for runtime resolution)
+REFERENCE_MODELS = _get_reference_models()
+AGGREGATOR_MODEL = _get_aggregator_model()
 
 # ── Token budgets ──────────────────────────────────────────────────────────
 REFERENCE_MAX_TOKENS = int(os.environ.get("MOA_REF_MAX_TOKENS", "8000"))
@@ -199,24 +217,45 @@ async def ollama_chat(
 
     headers = _auth_headers()
 
+    url = _get_ollama_url()
+    url = _get_ollama_url()
     for attempt in range(3):
         try:
             async with session.post(
-                OLLAMA_URL,
+                url,
                 json=payload,
                 headers=headers,
                 timeout=aiohttp.ClientTimeout(total=timeout),
             ) as resp:
+                # Handle 429 rate-limiting with Retry-After
+                if resp.status == 429 and attempt < 2:
+                    retry_after = int(resp.headers.get("Retry-After", str(5 * (attempt + 1))))
+                    logger.warning("⏳ %s: rate-limited (429), retrying in %ss", model, retry_after)
+                    await asyncio.sleep(retry_after)
+                    continue
+
+                # Don't retry on 4xx (except 429) — auth errors, bad model, etc.
+                if 400 <= resp.status < 500 and resp.status != 429:
+                    body = await resp.text()
+                    return f"[ERROR: {model} HTTP {resp.status}: {body[:200]}]"
+
                 resp.raise_for_status()
                 data = await resp.json()
                 return data["choices"][0]["message"]["content"]
+        except aiohttp.ClientResponseError as e:
+            if 400 <= e.status < 500 and e.status != 429:
+                return f"[ERROR: {model} HTTP {e.status}: {e.message}]"
+            if attempt < 2:
+                await asyncio.sleep(2 ** attempt)
+            else:
+                return f"[ERROR: {model} failed after 3 attempts: {e}]"
         except Exception as e:
             logger.debug("Attempt %d for %s failed: %s", attempt + 1, model, e)
             if attempt < 2:
                 await asyncio.sleep(2 ** attempt)
             else:
                 return f"[ERROR: {model} failed after 3 attempts: {e}]"
-    return f"[ERROR: {model} unreachable]"
+    return f"[ERROR: {model} exhausted all retries]"
 
 
 # ── Layer 1: Reference ──────────────────────────────────────────────────────
@@ -225,6 +264,7 @@ async def run_reference_layer(
     user_prompt: str,
     models: Optional[List[str]] = None,
     max_concurrency: int = MAX_CONCURRENCY,
+    timeout: int = 120,
 ) -> List[str]:
     models = models or REFERENCE_MODELS
     semaphore = asyncio.Semaphore(max_concurrency)
@@ -237,6 +277,7 @@ async def run_reference_layer(
                 messages=[{"role": "user", "content": user_prompt}],
                 temperature=REFERENCE_TEMPERATURE,
                 max_tokens=REFERENCE_MAX_TOKENS,
+                timeout=timeout,
             )
 
     tasks = [_call(m) for m in models]
@@ -261,6 +302,7 @@ async def run_aggregator(
     user_prompt: str,
     reference_responses: List[str],
     aggregator_model: Optional[str] = None,
+    timeout: int = 120,
 ) -> str:
     model = aggregator_model or AGGREGATOR_MODEL
 
@@ -282,6 +324,7 @@ async def run_aggregator(
         messages=messages,
         temperature=AGGREGATOR_TEMPERATURE,
         max_tokens=AGGREGATOR_MAX_TOKENS,
+        timeout=timeout,
     )
 
 
@@ -294,6 +337,7 @@ async def mixture_of_agents_local(
     use_k2_routing: bool = False,
     task_type: str = "analysis",
     budget: str = "balanced",
+    timeout: int = 120,
 ) -> Dict[str, Any]:
     """
     Run MoA pipeline (local or cloud).
@@ -321,6 +365,10 @@ async def mixture_of_agents_local(
                 "processing_time": 0.0,
                 "error": "Missing OLLAMA_API_KEY",
             }
+        # Use cloud defaults if none specified
+        if reference_models is None:
+            reference_models = _get_reference_models()
+        resolved_agg = aggregator_model if aggregator_model is not None else _get_aggregator_model()
     else:
         try:
             available = _check_local_ollama()
@@ -334,24 +382,30 @@ async def mixture_of_agents_local(
                 "error": str(e),
             }
         if reference_models is None:
-            reference_models = REFERENCE_MODELS
+            reference_models = _get_reference_models()
         resolved_refs = _resolve_available_models(reference_models, available)
         if len(resolved_refs) < len(reference_models):
             logger.info("Resolved %d/%d models", len(resolved_refs), len(reference_models))
         reference_models = resolved_refs
+        resolved_agg = aggregator_model if aggregator_model is not None else _get_aggregator_model()
 
     # K2 routing
     if use_k2_routing and reference_models is None:
         ref_models, agg_model = get_k2_routed_models(task_type=task_type, budget=budget, diversity=4)
         reference_models = ref_models
         aggregator_model = aggregator_model or agg_model
+        resolved_agg = aggregator_model if aggregator_model is not None else _get_aggregator_model()
 
-    resolved_refs = reference_models if reference_models is not None else REFERENCE_MODELS
-    agg_model_resolved = aggregator_model if aggregator_model is not None else AGGREGATOR_MODEL
+    resolved_refs = reference_models if reference_models is not None else _get_reference_models()
+    # Use resolved_agg from pre-flight if not overridden by K2
+    if "resolved_agg" not in dir():
+        agg_model_resolved = aggregator_model if aggregator_model is not None else _get_aggregator_model()
+    else:
+        agg_model_resolved = resolved_agg
 
     async with aiohttp.ClientSession() as session:
         logger.info("Layer 1: Querying %d reference models (max_concurrency=%d)...", len(resolved_refs), max_concurrency)
-        references = await run_reference_layer(session, user_prompt, resolved_refs, max_concurrency)
+        references = await run_reference_layer(session, user_prompt, resolved_refs, max_concurrency, timeout=timeout)
 
         if len(references) < 1:
             elapsed = round(time.time() - start, 2)
@@ -365,7 +419,7 @@ async def mixture_of_agents_local(
             }
 
         logger.info("Layer 2: Aggregating %d responses via %s...", len(references), agg_model_resolved)
-        final = await run_aggregator(session, user_prompt, references, agg_model_resolved)
+        final = await run_aggregator(session, user_prompt, references, agg_model_resolved, timeout=timeout)
 
         if final.startswith("[ERROR"):
             elapsed = round(time.time() - start, 2)
@@ -392,10 +446,11 @@ async def mixture_of_agents_local(
 
 # ── CLI ──────────────────────────────────────────────────────────────────────
 def main() -> None:
+    global MODE, REFERENCE_MODELS, AGGREGATOR_MODEL, OLLAMA_URL
     parser = argparse.ArgumentParser(
         description="Mixture-of-Agents pipeline via Ollama (local or cloud)",
     )
-    parser.add_argument("prompt", help="The user prompt / question")
+    parser.add_argument("prompt", nargs="?", default=None, help="The user prompt / question")
     parser.add_argument("--mode", choices=["local", "cloud"], default=os.environ.get("MOA_MODE", "local"),
                         help="Execution mode (default: env MOA_MODE or 'local')")
     parser.add_argument("--refs", default=None, help="Comma-separated reference models (default: mode-specific)")
@@ -406,14 +461,53 @@ def main() -> None:
     parser.add_argument("--budget", default="balanced", choices=["quality_first", "balanced", "cost_first"],
                         help="Budget mode for K2 routing")
     parser.add_argument("--debug", action="store_true", help="Verbose debug logging")
+    parser.add_argument("--list-models", action="store_true", help="List available models and exit")
+    parser.add_argument("--timeout", type=int, default=None, help="Per-request timeout in seconds (default: 120)")
 
     args = parser.parse_args()
     _setup_logging(args.debug)
 
-    # Override mode via CLI if provided
+    # Handle --list-models
+    if args.list_models:
+        if args.mode:
+            MODE = args.mode
+            OLLAMA_URL = _get_ollama_url()
+        if MODE == "cloud":
+            if not API_KEY:
+                print("Error: OLLAMA_API_KEY required for cloud mode", file=sys.stderr)
+                sys.exit(1)
+            import urllib.request
+            headers = {"Authorization": f"Bearer {API_KEY}"}
+            req = urllib.request.Request(CLOUD_MODELS_URL, headers=headers)
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                data = json.loads(resp.read().decode())
+            models = sorted([m["id"] for m in data.get("data", [])])
+            print(f"Available Ollama Cloud models ({len(models)}):")
+            for m in models:
+                print(f"  {m}")
+        else:
+            try:
+                available = _check_local_ollama()
+                print(f"Available local Ollama models ({len(available)}):")
+                for m in sorted(available):
+                    print(f"  {m}")
+            except RuntimeError as e:
+                print(f"Error: {e}", file=sys.stderr)
+                sys.exit(1)
+        return
+
+    if not args.prompt:
+        parser.print_help()
+        sys.exit(1)
+
+    # Override mode via CLI if provided — update global so all functions pick it up
     if args.mode != MODE:
+        MODE = args.mode
         os.environ["MOA_MODE"] = args.mode
-        logger.info("Switched mode to: %s", args.mode)
+        REFERENCE_MODELS = _get_reference_models()
+        AGGREGATOR_MODEL = _get_aggregator_model()
+        OLLAMA_URL = _get_ollama_url()
+        logger.info("Switched mode to: %s (refs=%s, agg=%s)", args.mode, REFERENCE_MODELS, AGGREGATOR_MODEL)
 
     ref_models = args.refs.split(",") if args.refs else None
     max_conc = args.max_conc or MAX_CONCURRENCY
@@ -426,6 +520,7 @@ def main() -> None:
         use_k2_routing=args.k2,
         task_type=args.task_type,
         budget=args.budget,
+        timeout=args.timeout or 120,
     ))
     print(json.dumps(result, indent=2, ensure_ascii=False))
 
