@@ -1,149 +1,257 @@
 ---
 name: local-mixture-of-agents
-description: "Run a Mixture-of-Agents (MoA) pipeline via Ollama Cloud — parallel reference models → aggregator synthesis for enhanced reasoning on complex problems."
-version: 2.0.0
+description: "Mixture-of-Agents (MoA) pipeline — dual-mode: local Ollama or Ollama Cloud. Parallel reference models → aggregator synthesis for enhanced reasoning."
+version: 3.0.0
 author: 0x-wzw
-trigger: "MoA, Ollama mixture of agents, multi-model aggregation, cloud reasoning pipeline"
+trigger: "MoA, Ollama mixture of agents, multi-model aggregation, local reasoning, cloud reasoning, K2 routing"
 metadata:
   hermes:
-    tags: [ollama, moa, mixture-of-agents, ollama-cloud, reasoning, multi-model]
+    tags: [ollama, moa, mixture-of-agents, local, cloud, reasoning, multi-model, k2]
 ---
 
-# Mixture-of-Agents (Ollama Cloud)
+# Mixture-of-Agents (Dual-Mode: Local + Cloud)
 
-Run a Mixture-of-Agents pipeline via the Ollama Cloud OpenAI-compatible endpoint. Multiple diverse models generate reference responses in parallel, then an aggregator model synthesizes them into a single high-quality answer.
+Run a Mixture-of-Agents pipeline via **Ollama** (local) or **Ollama Cloud** (remote). Multiple diverse models generate reference responses in parallel, then an aggregator synthesizes them into a single high-quality answer.
 
-**When to use:** complex reasoning problems where a single model may hallucinate or miss edge cases — math, coding, architecture decisions, multi-step analysis. Cloud endpoint means no local GPU required.
+**When to use:** Complex reasoning problems where a single model may hallucinate or miss edge cases — math, coding, architecture decisions, multi-step analysis.
+
+**Two modes:**
+| Mode | Endpoint | Auth | GPU required | Best for |
+|------|----------|------|------------|----------|
+| **local** (default) | `http://127.0.0.1:11434` | None | Yes (or CPU) | Sovereignty, privacy, offline |
+| **cloud** | `https://ollama.com/v1` | API key | No | Speed, no hardware constraints |
 
 ---
 
 ## Architecture
 
-| Layer | Role | Default Models |
-|-------|------|----------------|
-| **Layer 1: Reference** | Parallel generation (diverse perspectives) | `qwen3-coder:480b`, `kimi-k2.6`, `deepseek-v4-flash`, `gemma4:31b` |
-| **Layer 2: Aggregator** | Critical synthesis into final answer | `deepseek-v4-flash` (configurable) |
+```
+┌──────────────────────────────────────────────────────────┐
+│  USER PROMPT                                             │
+└────────────────────┬───────────────────────────────────────┘
+                     │
+        ┌────────────┴────────────┐
+        ▼                       ▼
+   ┌─────────┐            ┌─────────┐     ... (N models)
+   │ Model A │            │ Model B │
+   └────┬────┘            └────┬────┘
+        │                        │
+        └────────┬───────────────┘
+                 ▼
+          ┌─────────────┐
+          │ Aggregator  │  ← "Synthesize best elements, discard errors"
+          └──────┬──────┘
+                 ▼
+           FINAL ANSWER
+```
 
-All calls hit the Ollama Cloud API at `https://ollama.com/v1/chat/completions`.
-
-API key is resolved from (in order):
-1. `OLLAMA_API_KEY` environment variable
-2. `~/.hermes/.env` file
-3. `~/.ollama/token` file (ollama CLI token)
+| Layer | Role | Local defaults | Cloud defaults |
+|-------|------|---------------|----------------|
+| **Reference** | Parallel generation | `llama3.3`, `qwen2.5`, `mistral`, `phi4` | `qwen3-coder:480b`, `kimi-k2.6`, `deepseek-v4-flash`, `gemma4:31b` |
+| **Aggregator** | Critical synthesis | `llama3.3` | `deepseek-v4-flash` |
 
 ---
 
 ## Prerequisites
 
-1. **Ollama Cloud API key** — set in `~/.hermes/.env`:
+### Local mode
+1. [Install Ollama](https://ollama.com/download)
+2. Pull models:
+   ```bash
+   ollama pull llama3.3 qwen2.5 mistral phi4
+   ```
+
+### Cloud mode
+1. Set API key in `~/.hermes/.env`:
    ```
    OLLAMA_API_KEY=your_key_here
    ```
+   Or use env var: `export OLLAMA_API_KEY=...`
 
-2. **Python dependencies**
-   ```bash
-   pip install aiohttp
-   ```
-
----
-
-## Available Ollama Cloud Models
-
-35 models available as of June 2026. The defaults below were chosen for **architectural diversity** (Qwen + Kimi + DeepSeek + Gemma) which provides more value than using models from the same family.
-
-**Full list:** `qwen3-coder:480b`, `deepseek-v4-pro`, `deepseek-v3.1:671b`, `qwen3-coder-next`, `gemma3:12b`, `glm-4.7`, `glm-5.1`, `kimi-k2.6`, `kimi-k2.7-code`, `nemotron-3-nano:30b`, `minimax-m2.5`, `kimi-k2.5`, `minimax-m2.1`, `ministral-3:14b`, `mistral-large-3:675b`, `gemma3:4b`, `gemma3:27b`, `nemotron-3-super`, `deepseek-v4-flash`, `ministral-3:3b`, `devstral-2:123b`, `rnj-1:8b`, `qwen3.5:397b`, `deepseek-v3.2`, `gpt-oss:20b`, `minimax-m2.7`, `devstral-small-2:24b`, `gemma4:31b`, `nemotron-3-ultra`, `gemini-3-flash-preview`, `gpt-oss:120b`, `minimax-m3`, `ministral-3:8b`, `glm-5`, `glm-5.2`
-
----
-
-## Usage from Hermes
-
-### Option A: Direct script execution (recommended)
-
+### Both modes
 ```bash
-python ~/.hermes/skills/local-mixture-of-agents/scripts/local_moa.py "<your complex prompt>"
+pip install -r requirements.txt   # aiohttp
 ```
 
-The script prints a JSON result to stdout:
+---
+
+## Quick Start
+
+### Local mode (default)
+```bash
+python scripts/local_moa.py "Explain the trade-offs between REST and GraphQL"
+```
+
+### Cloud mode
+```bash
+MOA_MODE=cloud python scripts/local_moa.py "Explain quantum entanglement"
+```
+
+### K2-Backbone dynamic routing (optional)
+```bash
+python scripts/local_moa.py "Refactor this Python class" --k2 --task-type code --budget quality_first
+```
+
+---
+
+## Programmatic Usage
+
+```python
+import asyncio
+import os
+import sys
+sys.path.insert(0, os.path.expanduser("~/.hermes/skills/local-mixture-of-agents/scripts"))
+from local_moa import mixture_of_agents_local
+
+# Local mode (default)
+result = asyncio.run(mixture_of_agents_local(
+    user_prompt="Your complex question here",
+    reference_models=["llama3.3", "qwen2.5"],  # optional override
+    aggregator_model="llama3.3",               # optional override
+    max_concurrency=2,                        # optional: limit parallelism
+))
+print(result["response"])
+
+# Cloud mode
+os.environ["MOA_MODE"] = "cloud"
+result = asyncio.run(mixture_of_agents_local(
+    user_prompt="Your complex question here",
+    reference_models=["deepseek-v4-flash", "kimi-k2.6"],
+    aggregator_model="deepseek-v4-flash",
+))
+
+# With K2 routing
+result = asyncio.run(mixture_of_agents_local(
+    user_prompt="Your complex question here",
+    use_k2_routing=True,
+    task_type="analysis",    # "code", "research", "creative", ...
+    budget="balanced",       # "quality_first", "balanced", "cost_first"
+))
+```
+
+---
+
+## CLI Options
+
+```bash
+python scripts/local_moa.py "<prompt>" [options]
+
+Options:
+  --mode {local,cloud}        Execution mode (default: env MOA_MODE or 'local')
+  --refs MODEL1,MODEL2,...   Reference models (mode-specific defaults)
+  --agg MODEL                Aggregator model (mode-specific default)
+  --max-conc N               Max parallel calls (default: 4)
+  --k2                       Enable K2-Backbone dynamic model routing
+  --task-type TYPE           Task type for K2 routing (default: analysis)
+  --budget {quality_first,balanced,cost_first}
+                             Budget mode for K2 routing (default: balanced)
+  --debug                    Enable verbose debug logging
+```
+
+---
+
+## Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MOA_MODE` | `local` | `local` or `cloud` |
+| `OLLAMA_URL` | `http://127.0.0.1:11434/v1/chat/completions` | Local API endpoint |
+| `OLLAMA_TAGS_URL` | `http://127.0.0.1:11434/api/tags` | Local model list endpoint |
+| `OLLAMA_BASE_URL` | `https://ollama.com/v1` | Cloud base URL |
+| `OLLAMA_API_KEY` | — | Cloud API key (required for cloud mode) |
+| `MOA_REF_MAX_TOKENS` | `8000` | Max tokens per reference response |
+| `MOA_AGG_MAX_TOKENS` | `16000` | Max tokens for aggregator response |
+| `MOA_MAX_CONCURRENCY` | `4` | Max parallel reference calls |
+
+---
+
+## K2-Backbone Integration (Optional)
+
+When `k2_backbone` is installed, MoA can query K2's capability matrix to dynamically select models best suited for the task type and budget. This is **opt-in** — set `use_k2_routing=True` or pass `--k2`.
+
+```python
+# K2 selects models based on:
+# - task_type: "code", "analysis", "research", "creative", etc.
+# - budget: "quality_first", "balanced", "cost_first"
+# - diversity: number of architecturally distinct models
+
+refs, agg = get_k2_routed_models(
+    task_type="code",
+    budget="quality_first",
+    diversity=4,
+)
+# Returns (['qwen3-coder:480b', 'kimi-k2.7-code', ...], 'deepseek-v4-flash')
+```
+
+---
+
+## Failure Handling
+
+| Stage | Behaviour |
+|-------|-----------|
+| **Pre-flight (local)** | Probes Ollama connectivity and model availability before any API calls. Fails fast with clear message if Ollama is down or models missing. |
+| **Pre-flight (cloud)** | Validates `OLLAMA_API_KEY` is present. Fails fast if missing. |
+| **Reference layer** | Failed models logged and skipped. Pipeline requires **≥1 successful reference** to proceed. |
+| **Aggregator** | If aggregator fails, returns `success: false` with error details — never silently returns an error string as the answer. |
+| **All layers** | 3 retry attempts with exponential backoff per model. |
+
+---
+
+## Output Format
 
 ```json
 {
   "success": true,
   "response": "<synthesized final answer>",
   "models_used": {
-    "reference": ["qwen3-coder:480b", "kimi-k2.6", "deepseek-v4-flash", "gemma4:31b"],
-    "aggregator": "deepseek-v4-flash"
+    "reference": ["llama3.3", "qwen2.5", "mistral", "phi4"],
+    "aggregator": "llama3.3"
   },
   "reference_count": 4,
-  "processing_time": 45.2
+  "processing_time": 42.5,
+  "error": null
 }
 ```
-
-### Option B: Via `execute_code`
-
-```python
-import asyncio
-import sys
-sys.path.insert(0, "~/.hermes/skills/local-mixture-of-agents/scripts")
-from local_moa import mixture_of_agents_local
-
-result = asyncio.run(mixture_of_agents_local(
-    user_prompt="Explain the trade-offs between REST and GraphQL APIs...",
-    reference_models=["qwen3-coder:480b", "kimi-k2.6"],  # optional: override defaults
-    aggregator_model="deepseek-v4-flash"                  # optional: override default
-))
-
-print(result["response"])
-```
-
-### Option C: Customise model lineup
-
-Edit the constants at the top of `scripts/local_moa.py`:
-
-```python
-REFERENCE_MODELS = ["qwen3-coder:480b", "kimi-k2.6", "deepseek-v4-flash", "gemma4:31b"]
-AGGREGATOR_MODEL = "deepseek-v4-flash"
-```
-
-Or pass them at runtime as shown in Option B.
-
----
-
-## Customisation Guide
-
-| Parameter | Default | Tuning advice |
-|-----------|---------|---------------|
-| `REFERENCE_MODELS` | 4 models | More models = more diversity, but linearly slower. Minimum viable: 2. |
-| `AGGREGATOR_MODEL` | `deepseek-v4-flash` | Use your strongest model. This is the quality bottleneck. |
-| `REFERENCE_TEMPERATURE` | `0.6` | Higher = more diverse perspectives. Lower = more consistent references. |
-| `AGGREGATOR_TEMPERATURE` | `0.4` | Keep low. The aggregator must synthesize, not invent. |
-| `timeout` | `120s` | Cloud models are fast; increase only for very long context. |
-
-**Model diversity matters more than raw parameter count.** If all your models share the same architecture (e.g., all Llama-based), cross-referencing provides less value than mixing families (Qwen + Kimi + DeepSeek + Gemma).
-
----
-
-## Failure Handling
-
-- The pipeline requires **≥1 successful reference model** to proceed to aggregation.
-- Failed models are logged to stderr and skipped silently.
-- If all references fail, the tool returns a JSON error with `success: false`.
-- Each model has 3 retry attempts with exponential backoff.
-- If `OLLAMA_API_KEY` is not found, returns an immediate error with setup instructions.
 
 ---
 
 ## Cost & Performance
 
-| Metric | Ollama Cloud MoA | Local Ollama MoA | Hermes Built-in MoA |
-|--------|-------------------|-------------------|---------------------|
-| API cost | Included in Ollama Cloud subscription | Free (your hardware) | ~5× OpenRouter API calls |
-| Typical latency | 10–60s (cloud) | 30–120s (GPU) / 2–10min (CPU) | 15–60s (cloud) |
-| Model quality | Open-weight (up to 480B) | Open-weight (7B–70B) | Frontier (Claude, GPT, Gemini) |
-| Privacy | Cloud-transmitted | Fully local | Cloud-transmitted |
-| Local GPU required | No | Yes | No |
+| Metric | Local MoA | Cloud MoA | Hermes Built-in MoA |
+|--------|-----------|-----------|---------------------|
+| API cost | Free (your hardware) | Per-token (Ollama Cloud) | ~5× OpenRouter API calls |
+| Typical latency | 30–120s (GPU) / 2–10min (CPU) | 15–60s (cloud) | 15–60s (cloud) |
+| Model quality | Open-weight (7B–70B) | Frontier open-weight | Frontier (Claude, GPT, Gemini) |
+| Privacy | Fully local | Cloud-transmitted | Cloud-transmitted |
+| Offline | ✅ Yes | ❌ No | ❌ No |
+
+Use **local** when privacy, cost, or offline operation are paramount.  
+Use **cloud** when you lack local GPU or need faster turnaround.  
+Use **Hermes built-in** when maximum reasoning quality is the priority.
 
 ---
 
 ## Files
 
-- `scripts/local_moa.py` — Full pipeline script (Layer 1 + Layer 2)
+| File | Description |
+|------|-------------|
+| `scripts/local_moa.py` | Full pipeline — dual-mode, K2 routing, CLI |
+| `scripts/__init__.py` | Enables `from scripts.local_moa import ...` |
+| `SKILL.md` | This file |
+| `README.md` | GitHub-facing overview |
+| `requirements.txt` | `aiohttp>=3.8.0` |
+| `.env.example` | Template for environment variables |
+
+---
+
+## Troubleshooting
+
+| Symptom | Likely cause | Fix |
+|---------|-------------|-----|
+| `Ollama not reachable` | Ollama not running | `ollama serve` or `sudo systemctl start ollama` |
+| `Model 'X' not found` | Model not pulled | `ollama pull X` |
+| `OLLAMA_API_KEY not found` | Key not set | Add to `~/.hermes/.env` or export |
+| `All reference models failed` | Network issue or API downtime | Check connectivity; retry later |
+| `K2-Backbone not available` | K2 not installed | `pip install k2-backbone` or ignore (falls back to defaults) |
+| High memory usage | Too many parallel calls | Lower `--max-conc` or `MOA_MAX_CONCURRENCY` |
+| Slow on CPU | Normal for local CPU inference | Use cloud mode or reduce reference model count |
