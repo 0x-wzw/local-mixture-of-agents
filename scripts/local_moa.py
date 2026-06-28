@@ -25,6 +25,8 @@ from typing import Any, Dict, List, Optional
 
 import aiohttp
 
+__version__ = "3.1.0"
+
 # ── Logging ────────────────────────────────────────────────────────────────
 logger = logging.getLogger("local_moa")
 
@@ -79,7 +81,9 @@ def get_k2_routed_models(
 # ── Mode & Endpoint ────────────────────────────────────────────────────────
 _INITIAL_MODE = os.environ.get("MOA_MODE", "local").strip().lower()
 if _INITIAL_MODE not in ("local", "cloud"):
-    raise ValueError(f"MOA_MODE must be 'local' or 'cloud', got '{_INITIAL_MODE}'")
+    import warnings
+    warnings.warn(f"MOA_MODE must be 'local' or 'cloud', got '{_INITIAL_MODE}'. Defaulting to 'local'.", stacklevel=2)
+    _INITIAL_MODE = "local"
 
 MODE = _INITIAL_MODE
 
@@ -212,7 +216,7 @@ async def ollama_chat(
         "temperature": temperature,
         "stream": False,
     }
-    if max_tokens:
+    if max_tokens is not None:
         payload["max_tokens"] = max_tokens
 
     headers = _auth_headers()
@@ -265,6 +269,7 @@ async def run_reference_layer(
     models: Optional[List[str]] = None,
     max_concurrency: int = MAX_CONCURRENCY,
     timeout: int = 120,
+    temperature: float = REFERENCE_TEMPERATURE,
 ) -> List[str]:
     models = models or REFERENCE_MODELS
     semaphore = asyncio.Semaphore(max_concurrency)
@@ -275,7 +280,7 @@ async def run_reference_layer(
                 session=session,
                 model=m,
                 messages=[{"role": "user", "content": user_prompt}],
-                temperature=REFERENCE_TEMPERATURE,
+                temperature=temperature,
                 max_tokens=REFERENCE_MAX_TOKENS,
                 timeout=timeout,
             )
@@ -303,14 +308,17 @@ async def run_aggregator(
     reference_responses: List[str],
     aggregator_model: Optional[str] = None,
     timeout: int = 120,
+    temperature: float = AGGREGATOR_TEMPERATURE,
 ) -> str:
     model = aggregator_model or AGGREGATOR_MODEL
 
-    # Pass full responses (no truncation) — token budget governs length
-    response_text = "\n\n".join(
-        f"--- Response {i + 1} ---\n{r}"
-        for i, r in enumerate(reference_responses)
-    )
+    # Pass full responses with model attribution for critical evaluation
+    model_names = resolved_refs if 'resolved_refs' in dir() else None
+    response_parts = []
+    for i, r in enumerate(reference_responses):
+        model_tag = f" (model: {model_names[i]})" if model_names and i < len(model_names) else ""
+        response_parts.append(f"--- Response {i + 1}{model_tag} ---\n{r}")
+    response_text = "\n\n".join(response_parts)
 
     system_prompt = f"{AGGREGATOR_SYSTEM_PROMPT}\n\n{response_text}"
     messages = [
@@ -322,7 +330,7 @@ async def run_aggregator(
         session=session,
         model=model,
         messages=messages,
-        temperature=AGGREGATOR_TEMPERATURE,
+        temperature=temperature,
         max_tokens=AGGREGATOR_MAX_TOKENS,
         timeout=timeout,
     )
@@ -338,6 +346,8 @@ async def mixture_of_agents_local(
     task_type: str = "analysis",
     budget: str = "balanced",
     timeout: int = 120,
+    reference_temperature: float = REFERENCE_TEMPERATURE,
+    aggregator_temperature: float = AGGREGATOR_TEMPERATURE,
 ) -> Dict[str, Any]:
     """
     Run MoA pipeline (local or cloud).
@@ -352,7 +362,7 @@ async def mixture_of_agents_local(
             "error": str | None,
         }
     """
-    start = time.time()
+    start = time.perf_counter()
 
     # Pre-flight checks
     if MODE == "cloud":
@@ -389,26 +399,35 @@ async def mixture_of_agents_local(
         reference_models = resolved_refs
         resolved_agg = aggregator_model if aggregator_model is not None else _get_aggregator_model()
 
-    # K2 routing
+    # K2 routing — must run BEFORE local model resolution so K2 models flow
+    # through _resolve_available_models in local mode
     if use_k2_routing and reference_models is None:
-        ref_models, agg_model = get_k2_routed_models(task_type=task_type, budget=budget, diversity=4)
+        ref_models, agg_model = get_k2_routed_models(
+            task_type=task_type, budget=budget,
+            diversity=len(reference_models) if reference_models else 4,
+        )
         reference_models = ref_models
         aggregator_model = aggregator_model or agg_model
-        resolved_agg = aggregator_model if aggregator_model is not None else _get_aggregator_model()
 
-    resolved_refs = reference_models if reference_models is not None else _get_reference_models()
-    # Use resolved_agg from pre-flight if not overridden by K2
-    if "resolved_agg" not in dir():
-        agg_model_resolved = aggregator_model if aggregator_model is not None else _get_aggregator_model()
+    # Resolve references: filter by local availability in local mode
+    if MODE == "local":
+        if reference_models is None:
+            reference_models = _get_reference_models()
+        # Re-resolve after potential K2 override
+        resolved_refs = _resolve_available_models(reference_models, available)
+        if len(resolved_refs) < len(reference_models):
+            logger.info("Resolved %d/%d models locally", len(resolved_refs), len(reference_models))
     else:
-        agg_model_resolved = resolved_agg
+        resolved_refs = reference_models if reference_models is not None else _get_reference_models()
 
-    async with aiohttp.ClientSession() as session:
+    agg_model_resolved = aggregator_model if aggregator_model is not None else _get_aggregator_model()
+
+    async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(limit=max_concurrency)) as session:
         logger.info("Layer 1: Querying %d reference models (max_concurrency=%d)...", len(resolved_refs), max_concurrency)
-        references = await run_reference_layer(session, user_prompt, resolved_refs, max_concurrency, timeout=timeout)
+        references = await run_reference_layer(session, user_prompt, resolved_refs, max_concurrency, timeout=timeout, temperature=reference_temperature)
 
         if len(references) < 1:
-            elapsed = round(time.time() - start, 2)
+            elapsed = round(time.perf_counter() - start, 2)
             return {
                 "success": False,
                 "response": "All reference models failed. Cannot proceed with aggregation.",
@@ -419,10 +438,10 @@ async def mixture_of_agents_local(
             }
 
         logger.info("Layer 2: Aggregating %d responses via %s...", len(references), agg_model_resolved)
-        final = await run_aggregator(session, user_prompt, references, agg_model_resolved, timeout=timeout)
+        final = await run_aggregator(session, user_prompt, references, agg_model_resolved, timeout=timeout, temperature=aggregator_temperature)
 
         if final.startswith("[ERROR"):
-            elapsed = round(time.time() - start, 2)
+            elapsed = round(time.perf_counter() - start, 2)
             return {
                 "success": False,
                 "response": final,
@@ -432,7 +451,7 @@ async def mixture_of_agents_local(
                 "error": f"Aggregator failed: {final}",
             }
 
-        elapsed = round(time.time() - start, 2)
+        elapsed = round(time.perf_counter() - start, 2)
         logger.info("MoA completed in %ss", elapsed)
         return {
             "success": True,
@@ -461,8 +480,12 @@ def main() -> None:
     parser.add_argument("--budget", default="balanced", choices=["quality_first", "balanced", "cost_first"],
                         help="Budget mode for K2 routing")
     parser.add_argument("--debug", action="store_true", help="Verbose debug logging")
+    parser.add_argument("--version", action="version", version=f"local-moa {__version__}")
+    parser.add_argument("--raw", action="store_true", help="Print only the response text (no JSON wrapper)")
     parser.add_argument("--list-models", action="store_true", help="List available models and exit")
     parser.add_argument("--timeout", type=int, default=None, help="Per-request timeout in seconds (default: 120)")
+    parser.add_argument("--ref-temp", type=float, default=None, help="Reference layer temperature (default: 0.6)")
+    parser.add_argument("--agg-temp", type=float, default=None, help="Aggregator temperature (default: 0.4)")
 
     args = parser.parse_args()
     _setup_logging(args.debug)
@@ -509,7 +532,12 @@ def main() -> None:
         OLLAMA_URL = _get_ollama_url()
         logger.info("Switched mode to: %s (refs=%s, agg=%s)", args.mode, REFERENCE_MODELS, AGGREGATOR_MODEL)
 
-    ref_models = args.refs.split(",") if args.refs else None
+    ref_models = None
+    if args.refs is not None:
+        ref_models = [s.strip() for s in args.refs.split(",") if s.strip()]
+        if not ref_models:
+            print("Error: --refs provided but empty after parsing", file=sys.stderr)
+            sys.exit(1)
     max_conc = args.max_conc or MAX_CONCURRENCY
 
     result = asyncio.run(mixture_of_agents_local(
@@ -521,8 +549,13 @@ def main() -> None:
         task_type=args.task_type,
         budget=args.budget,
         timeout=args.timeout or 120,
+        reference_temperature=args.ref_temp if args.ref_temp is not None else REFERENCE_TEMPERATURE,
+        aggregator_temperature=args.agg_temp if args.agg_temp is not None else AGGREGATOR_TEMPERATURE,
     ))
-    print(json.dumps(result, indent=2, ensure_ascii=False))
+    if args.raw and result.get("success"):
+        print(result["response"])
+    else:
+        print(json.dumps(result, indent=2, ensure_ascii=False))
 
 
 if __name__ == "__main__":
