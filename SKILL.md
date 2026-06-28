@@ -77,14 +77,16 @@ The script prints a JSON result to stdout:
 
 ```python
 import asyncio
+import os
 import sys
-sys.path.insert(0, "~/.hermes/skills/local-mixture-of-agents/scripts")
+sys.path.insert(0, os.path.expanduser("~/.hermes/skills/local-mixture-of-agents/scripts"))
 from local_moa import mixture_of_agents_local
 
 result = asyncio.run(mixture_of_agents_local(
     user_prompt="Explain the trade-offs between REST and GraphQL APIs...",
     reference_models=["llama3.3", "qwen2.5"],  # optional: override defaults
-    aggregator_model="llama3.3"                 # optional: override default
+    aggregator_model="llama3.3",                # optional: override default
+    max_concurrency=2                          # optional: limit parallelism
 ))
 
 print(result["response"])
@@ -105,24 +107,61 @@ Or pass them at runtime as shown in Option B.
 
 ## Customisation Guide
 
+### Model lineup
+
 | Parameter | Default | Tuning advice |
 |-----------|---------|---------------|
 | `REFERENCE_MODELS` | 4 models | More models = more diversity, but linearly slower. Minimum viable: 2. |
 | `AGGREGATOR_MODEL` | `llama3.3` | Use your largest / best local model. This is the quality bottleneck. |
 | `REFERENCE_TEMPERATURE` | `0.6` | Higher = more diverse perspectives. Lower = more consistent references. |
 | `AGGREGATOR_TEMPERATURE` | `0.4` | Keep low. The aggregator must synthesize, not invent. |
+| `MAX_CONCURRENCY` | `4` | Lower for memory-constrained or CPU-only systems. Set to `1` to run sequentially. |
 | `timeout` | `120s` | Increase for slow CPUs or large context windows. |
+
+### Environment variables
+
+Set these before running the script to override defaults without editing code:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `OLLAMA_URL` | `http://127.0.0.1:11434/v1/chat/completions` | Ollama OpenAI-compatible endpoint |
+| `OLLAMA_TAGS_URL` | `http://127.0.0.1:11434/api/tags` | Ollama model list endpoint |
+| `MOA_REF_MAX_TOKENS` | `8000` | Max tokens per reference model response |
+| `MOA_AGG_MAX_TOKENS` | `16000` | Max tokens for aggregator final response |
+| `MOA_MAX_CONCURRENCY` | `4` | Max parallel reference calls |
 
 **Model diversity matters more than raw parameter count.** If all your models share the same architecture (e.g., all Llama-based), cross-referencing provides less value than mixing families (Llama + Qwen + Mistral + Phi).
 
 ---
 
+## CLI Options
+
+```bash
+python scripts/local_moa.py "<prompt>" [options]
+
+Options:
+  --refs MODEL1,MODEL2,...   Reference models (default: llama3.3,qwen2.5,mistral,phi4)
+  --agg MODEL                Aggregator model (default: llama3.3)
+  --max-conc N               Max parallel calls (default: 4)
+  --debug                    Enable verbose debug logging
+```
+
+Example:
+```bash
+python scripts/local_moa.py "Explain quantum entanglement" \
+  --refs llama3.3,mistral \
+  --agg llama3.3 \
+  --max-conc 2
+```
+
+---
+
 ## Failure Handling
 
-- The pipeline requires **≥1 successful reference model** to proceed to aggregation.
-- Failed models are logged to stderr and skipped silently.
-- If all references fail, the tool returns a JSON error with `success: false`.
-- Each model has 3 retry attempts with exponential backoff.
+- **Pre-flight:** The pipeline probes Ollama before any model calls. If Ollama is unreachable or required models are missing, it fails fast with a clear error message.
+- **Reference layer:** Failed models are logged and skipped. The pipeline requires **≥1 successful reference model** to proceed.
+- **Aggregator:** If the aggregator itself fails, the pipeline returns `success: false` with the error details — never silently returns an error string as the answer.
+- **All layers:** Each model has 3 retry attempts with exponential backoff.
 
 ---
 
