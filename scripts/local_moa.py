@@ -243,7 +243,6 @@ async def ollama_chat(
     headers = _auth_headers()
 
     url = _get_ollama_url()
-    url = _get_ollama_url()
     for attempt in range(3):
         try:
             async with session.post(
@@ -274,12 +273,20 @@ async def ollama_chat(
                 await asyncio.sleep(2 ** attempt)
             else:
                 return f"[ERROR: {model} failed after 3 attempts: {e}]"
-        except Exception as e:
+        except asyncio.CancelledError:
+            raise  # never swallow cancellation
+        except (aiohttp.ClientError, asyncio.TimeoutError, json.JSONDecodeError) as e:
             logger.debug("Attempt %d for %s failed: %s", attempt + 1, model, e)
             if attempt < 2:
                 await asyncio.sleep(2 ** attempt)
             else:
-                raise MoAModelError(model, 3, e)
+                raise MoAModelError(model, 3, e) from e
+        except Exception as e:
+            logger.debug("Attempt %d for %s failed (unexpected): %s", attempt + 1, model, e)
+            if attempt < 2:
+                await asyncio.sleep(2 ** attempt)
+            else:
+                raise MoAModelError(model, 3, e) from e
     raise MoAModelError(model, 3, RuntimeError("exhausted all retries"))
 
 
@@ -334,11 +341,9 @@ async def run_aggregator(
     model = aggregator_model or AGGREGATOR_MODEL
 
     # Pass full responses with model attribution for critical evaluation
-    model_names = resolved_refs if 'resolved_refs' in dir() else None
     response_parts = []
     for i, r in enumerate(reference_responses):
-        model_tag = f" (model: {model_names[i]})" if model_names and i < len(model_names) else ""
-        response_parts.append(f"--- Response {i + 1}{model_tag} ---\n{r}")
+        response_parts.append(f"--- Response {i + 1} ---\n{r}")
     response_text = "\n\n".join(response_parts)
 
     system_prompt = f"{AGGREGATOR_SYSTEM_PROMPT}\n\n{response_text}"
@@ -420,12 +425,10 @@ async def mixture_of_agents_local(
         reference_models = resolved_refs
         resolved_agg = aggregator_model if aggregator_model is not None else _get_aggregator_model()
 
-    # K2 routing — must run BEFORE local model resolution so K2 models flow
-    # through _resolve_available_models in local mode
+    # K2 routing — overrides default model selection when enabled
     if use_k2_routing and reference_models is None:
         ref_models, agg_model = get_k2_routed_models(
-            task_type=task_type, budget=budget,
-            diversity=len(reference_models) if reference_models else 4,
+            task_type=task_type, budget=budget, diversity=4,
         )
         reference_models = ref_models
         aggregator_model = aggregator_model or agg_model
@@ -434,7 +437,6 @@ async def mixture_of_agents_local(
     if MODE == "local":
         if reference_models is None:
             reference_models = _get_reference_models()
-        # Re-resolve after potential K2 override
         resolved_refs = _resolve_available_models(reference_models, available)
         if len(resolved_refs) < len(reference_models):
             logger.info("Resolved %d/%d models locally", len(resolved_refs), len(reference_models))
@@ -461,15 +463,18 @@ async def mixture_of_agents_local(
         logger.info("Layer 2: Aggregating %d responses via %s...", len(references), agg_model_resolved)
         final = await run_aggregator(session, user_prompt, references, agg_model_resolved, timeout=timeout, temperature=aggregator_temperature)
 
-        if final.startswith("[ERROR"):
+        if isinstance(final, Exception) or (isinstance(final, str) and final.startswith("[ERROR")):
             elapsed = round(time.perf_counter() - start, 2)
+            logger.warning("Aggregator failed, falling back to best reference response")
+            # Fall back to the longest reference response
+            fallback = max(references, key=len) if references else "No response available"
             return {
-                "success": False,
-                "response": final,
+                "success": True,
+                "response": fallback,
                 "models_used": {"reference": resolved_refs, "aggregator": agg_model_resolved},
                 "reference_count": len(references),
                 "processing_time": elapsed,
-                "error": f"Aggregator failed: {final}",
+                "error": f"Aggregator failed, used best reference fallback",
             }
 
         elapsed = round(time.perf_counter() - start, 2)
