@@ -27,6 +27,27 @@ import aiohttp
 
 __version__ = "3.1.0"
 
+__all__ = [
+    "ollama_chat",
+    "run_reference_layer",
+    "run_aggregator",
+    "mixture_of_agents_local",
+    "get_k2_routed_models",
+    "REFERENCE_MODELS",
+    "AGGREGATOR_MODEL",
+    "MoAModelError",
+]
+
+
+class MoAModelError(Exception):
+    """Raised when a model call fails after all retries."""
+
+    def __init__(self, model: str, attempts: int, cause: Exception) -> None:
+        self.model = model
+        self.attempts = attempts
+        self.cause = cause
+        super().__init__(f"{model} failed after {attempts} attempts: {cause}")
+
 # ── Logging ────────────────────────────────────────────────────────────────
 logger = logging.getLogger("local_moa")
 
@@ -258,8 +279,8 @@ async def ollama_chat(
             if attempt < 2:
                 await asyncio.sleep(2 ** attempt)
             else:
-                return f"[ERROR: {model} failed after 3 attempts: {e}]"
-    return f"[ERROR: {model} exhausted all retries]"
+                raise MoAModelError(model, 3, e)
+    raise MoAModelError(model, 3, RuntimeError("exhausted all retries"))
 
 
 # ── Layer 1: Reference ──────────────────────────────────────────────────────
