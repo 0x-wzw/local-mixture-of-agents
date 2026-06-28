@@ -145,6 +145,79 @@ print(result["response"])
 }
 ```
 
+## Integration: Standalone Multi-Agent Platform (Nexys)
+
+The MoA pipeline can be embedded in a **standalone platform** where each agent runs its own MoA configuration. See the working implementation:
+
+- **Repo:** https://github.com/0x-wzw/nexys
+- **Adapter:** `unified_platform/adapters/moa_enabled_agent.py`
+- **Demo:** `test_moa_platform.py`
+
+### Platform Architecture
+
+```
+┌─────────────────────────────────────────────────────┐
+│  MoAEnabledAgentService (IAgentService)               │
+│  Manages N agents, each with own MoA engine         │
+├─────────────────────────────────────────────────────┤
+│  Agent Alpha  │  Agent Beta  │  Agent Gamma        │
+│  ───────────  │  ──────────  │  ───────────        │
+│  Local MoA    │  Cloud MoA   │  Local MoA          │
+│  Code focus   │  Research    │  Analysis           │
+│  Cost-first   │  Quality     │  Balanced           │
+└─────────────────────────────────────────────────────┘
+         │            │            │
+         └────────────┼────────────┘
+                      ▼
+              CONVERGENCE (synthesis)
+```
+
+### How It Works
+
+1. **Create platform service:** `MoAEnabledAgentService()`
+2. **Spawn agents:** Each agent gets its own `MoAProfile` (mode, models, budget)
+3. **Dispatch in parallel:** `asyncio.gather(*[agent.execute(task) for agent in agents])`
+4. **Each agent runs MoA:** Its own Layer 1 (references) + Layer 2 (aggregator)
+5. **BOUNDARY gate:** Quality check before returning
+6. **CONVERGENCE:** Merge all outputs into one coherent answer
+
+### Example
+
+```python
+from unified_platform.adapters.moa_enabled_agent import MoAEnabledAgentService
+from unified_platform.interfaces import Task, AgentConfig, ResourceLimit, CoordinationStrategy
+
+platform = MoAEnabledAgentService()
+
+# Spawn 3 agents with different MoA configs
+await platform.create_agent(AgentConfig(
+    id="alpha", capabilities=["code"],
+    resources=ResourceLimit(token_limit=200000, memory_mb=1024, timeout_seconds=600),
+    metadata={"moa_mode": "local", "moa_refs": ["qwen2.5", "llama3.3"],
+              "moa_agg": "llama3.3", "moa_budget": "cost_first"},
+))
+
+await platform.create_agent(AgentConfig(
+    id="beta", capabilities=["research"],
+    resources=ResourceLimit(token_limit=200000, memory_mb=1024, timeout_seconds=600),
+    metadata={"moa_mode": "cloud", "moa_refs": ["kimi-k2.6", "gemma4:31b"],
+              "moa_agg": "kimi-k2.6", "moa_budget": "quality_first"},
+))
+
+# Dispatch same task to all in parallel
+task = Task(objective="Explain REST vs GraphQL", context={}, constraints={})
+results = await asyncio.gather(*[
+    platform.dispatch_task(aid, task) for aid in ["alpha", "beta"]
+])
+
+# Converge
+converged = await platform.coordinate(
+    agent_ids=["alpha", "beta"],
+    strategy=CoordinationStrategy.CONSENSUS,
+    objective=task.objective,
+)
+```
+
 ## When to Use
 
 - Complex math, coding, or architecture problems where a single model may hallucinate
