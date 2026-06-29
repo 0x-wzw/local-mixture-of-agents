@@ -86,6 +86,22 @@ python scripts/local_moa.py "<prompt>" [options]
   --budget {quality_first,balanced,cost_first}  Budget mode for K2
   --debug                    Enable verbose debug logging
   --list-models              List available models and exit
+  --ref-temp N               Reference layer temperature (default: 0.6)
+  --temperature N            Alias for --ref-temp
+  --agg-temp N               Aggregator temperature (default: 0.4)
+  --raw                      Print only the response text (no JSON)
+  --prompt-file FILE         Read prompt from file (use '-' for stdin)
+  --version                  Print version and exit
+```
+
+### Read prompt from stdin / file
+
+```bash
+# From stdin
+echo "Explain quantum entanglement" | python scripts/local_moa.py --mode cloud --prompt-file - --raw
+
+# From file
+python scripts/local_moa.py --prompt-file prompt.txt --mode cloud
 ```
 
 ### List available models

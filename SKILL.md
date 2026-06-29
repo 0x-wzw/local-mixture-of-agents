@@ -1,7 +1,7 @@
 ---
 name: local-mixture-of-agents
 description: "Mixture-of-Agents (MoA) pipeline — dual-mode: local Ollama or Ollama Cloud. Parallel reference models → aggregator synthesis for enhanced reasoning."
-version: 3.0.0
+version: 3.3.0
 author: 0x-wzw
 trigger: "MoA, Ollama mixture of agents, multi-model aggregation, local reasoning, cloud reasoning, K2 routing"
 metadata:

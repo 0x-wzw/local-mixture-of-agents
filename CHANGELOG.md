@@ -3,6 +3,26 @@
 All notable changes to this project are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [3.3.0] — 2026-06-30
+
+### Added
+- **`--prompt-file` CLI flag** — read the prompt from a file or stdin (`-` for stdin),
+  enabling piping and multi-line prompts.
+- **`--temperature` alias** for `--ref-temp` — shorter flag for the most common override.
+- **`list_available_models()`** async function — query the configured endpoint for
+  available models. Added to `__all__` as part of the public API.
+- **Per-model attribution** in the aggregator prompt — each reference response is
+  tagged with its model name (e.g. `--- Response 1 (model: kimi-k2.6) ---`) so the
+  aggregator can critically weight per the system prompt's instruction.
+- **Expanded `__all__`** — now exports `list_available_models`, `REFERENCE_TEMPERATURE`,
+  `AGGREGATOR_TEMPERATURE`, `MAX_CONCURRENCY`, and `__version__`.
+
+### Fixed
+- **K2 routing in cloud mode** — when `use_k2_routing=True` and no explicit models
+  are provided, K2 can now override cloud defaults. Previously the cloud pre-flight
+  assigned `reference_models` before the K2 guard check, making the `is None`
+  condition always `False`.
+
 ## [3.2.0] — 2026-06-29
 
 ### Added
