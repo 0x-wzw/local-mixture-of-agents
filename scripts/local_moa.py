@@ -25,7 +25,7 @@ from typing import Any, Dict, List, Optional
 
 import aiohttp
 
-__version__ = "3.2.0"
+__version__ = "3.3.0"
 
 __all__ = [
     "ollama_chat",
@@ -33,9 +33,14 @@ __all__ = [
     "run_aggregator",
     "mixture_of_agents_local",
     "get_k2_routed_models",
+    "list_available_models",
     "REFERENCE_MODELS",
     "AGGREGATOR_MODEL",
+    "REFERENCE_TEMPERATURE",
+    "AGGREGATOR_TEMPERATURE",
+    "MAX_CONCURRENCY",
     "MoAModelError",
+    "__version__",
 ]
 
 
@@ -337,13 +342,15 @@ async def run_aggregator(
     aggregator_model: Optional[str] = None,
     timeout: int = 120,
     temperature: float = AGGREGATOR_TEMPERATURE,
+    model_names: Optional[List[str]] = None,
 ) -> str:
     model = aggregator_model or AGGREGATOR_MODEL
 
     # Pass full responses with model attribution for critical evaluation
     response_parts = []
     for i, r in enumerate(reference_responses):
-        response_parts.append(f"--- Response {i + 1} ---\n{r}")
+        tag = f" (model: {model_names[i]})" if model_names and i < len(model_names) else ""
+        response_parts.append(f"--- Response {i + 1}{tag} ---\n{r}")
     response_text = "\n\n".join(response_parts)
 
     system_prompt = f"{AGGREGATOR_SYSTEM_PROMPT}\n\n{response_text}"
@@ -405,8 +412,8 @@ async def mixture_of_agents_local(
                 "processing_time": 0.0,
                 "error": "Missing OLLAMA_API_KEY",
             }
-        # Use cloud defaults if none specified
-        if reference_models is None:
+        # Use cloud defaults if none specified (but defer to K2 if requested)
+        if reference_models is None and not use_k2_routing:
             reference_models = _get_reference_models()
     else:
         try:
@@ -465,7 +472,7 @@ async def mixture_of_agents_local(
             }
 
         logger.info("Layer 2: Aggregating %d responses via %s...", len(references), agg_model_resolved)
-        final = await run_aggregator(session, user_prompt, references, agg_model_resolved, timeout=timeout, temperature=aggregator_temperature)
+        final = await run_aggregator(session, user_prompt, references, agg_model_resolved, timeout=timeout, temperature=aggregator_temperature, model_names=resolved_refs)
 
         if isinstance(final, Exception) or (isinstance(final, str) and final.startswith("[ERROR")):
             elapsed = round(time.perf_counter() - start, 2)
@@ -495,6 +502,20 @@ async def mixture_of_agents_local(
         }
 
 
+# ── Utility: List Models ─────────────────────────────────────────────────
+async def list_available_models() -> List[str]:
+    """Fetch the list of models available on the configured endpoint."""
+    if MODE == "cloud":
+        headers = {"Authorization": f"Bearer {API_KEY}"}
+        import urllib.request
+        req = urllib.request.Request(CLOUD_MODELS_URL, headers=headers)
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read().decode())
+        return sorted([m["id"] for m in data.get("data", [])])
+    else:
+        return _check_local_ollama()
+
+
 # ── CLI ──────────────────────────────────────────────────────────────────────
 def main() -> None:
     global MODE, REFERENCE_MODELS, AGGREGATOR_MODEL, OLLAMA_URL
@@ -516,8 +537,9 @@ def main() -> None:
     parser.add_argument("--raw", action="store_true", help="Print only the response text (no JSON wrapper)")
     parser.add_argument("--list-models", action="store_true", help="List available models and exit")
     parser.add_argument("--timeout", type=int, default=None, help="Per-request timeout in seconds (default: 120)")
-    parser.add_argument("--ref-temp", type=float, default=None, help="Reference layer temperature (default: 0.6)")
+    parser.add_argument("--ref-temp", "--temperature", dest="ref_temp", type=float, default=None, help="Reference layer temperature (default: 0.6)")
     parser.add_argument("--agg-temp", type=float, default=None, help="Aggregator temperature (default: 0.4)")
+    parser.add_argument("--prompt-file", default=None, help="Read prompt from file (use '-' for stdin)")
 
     args = parser.parse_args()
     _setup_logging(args.debug)
@@ -550,6 +572,14 @@ def main() -> None:
                 print(f"Error: {e}", file=sys.stderr)
                 sys.exit(1)
         return
+
+    # Handle --prompt-file
+    if args.prompt_file:
+        if args.prompt_file == "-":
+            args.prompt = sys.stdin.read().strip()
+        else:
+            with open(args.prompt_file, encoding="utf-8") as f:
+                args.prompt = f.read().strip()
 
     if not args.prompt:
         parser.print_help()
