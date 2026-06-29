@@ -41,6 +41,13 @@ venv.bak/
 .DS_Store
 Thumbs.db
 
+# Test / coverage artifacts
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+.ruff_cache/
+
 # Logs
 *.log
 logs/

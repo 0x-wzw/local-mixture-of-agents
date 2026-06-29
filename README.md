@@ -134,6 +134,7 @@ print(result["response"])
 ```json
 {
   "success": true,
+  "degraded": false,
   "response": "<synthesized final answer>",
   "models_used": {
     "reference": ["llama3.3", "qwen2.5"],
@@ -144,6 +145,10 @@ print(result["response"])
   "error": null
 }
 ```
+
+`degraded` is `true` only when the aggregator failed and the longest successful
+reference response was returned as a fallback (`success` stays `true`, and `error`
+explains the fallback).
 
 ## Integration: Standalone Multi-Agent Platform (Nexys)
 
