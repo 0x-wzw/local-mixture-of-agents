@@ -145,7 +145,13 @@ Options:
   --task-type TYPE           Task type for K2 routing (default: analysis)
   --budget {quality_first,balanced,cost_first}
                              Budget mode for K2 routing (default: balanced)
+  --timeout N                Per-request timeout in seconds (default: 120)
+  --ref-temp F               Reference layer temperature (default: 0.6)
+  --agg-temp F               Aggregator temperature (default: 0.4)
+  --raw                      Print only the response text (no JSON wrapper)
+  --list-models              List available models for the current mode and exit
   --debug                    Enable verbose debug logging
+  --version                  Print version and exit
 ```
 
 ---
@@ -158,10 +164,13 @@ Options:
 | `OLLAMA_URL` | `http://127.0.0.1:11434/v1/chat/completions` | Local API endpoint |
 | `OLLAMA_TAGS_URL` | `http://127.0.0.1:11434/api/tags` | Local model list endpoint |
 | `OLLAMA_BASE_URL` | `https://ollama.com/v1` | Cloud base URL |
-| `OLLAMA_API_KEY` | — | Cloud API key (required for cloud mode) |
+| `OLLAMA_API_KEY` | — | Cloud API key (required for cloud mode). Falls back to `~/.hermes/.env`, then `~/.ollama/token` if unset. |
 | `MOA_REF_MAX_TOKENS` | `8000` | Max tokens per reference response |
 | `MOA_AGG_MAX_TOKENS` | `16000` | Max tokens for aggregator response |
 | `MOA_MAX_CONCURRENCY` | `4` | Max parallel reference calls |
+
+Reference and aggregator temperatures default to `0.6` and `0.4` respectively and are
+adjustable via the `--ref-temp` / `--agg-temp` CLI flags.
 
 ---
 
@@ -192,7 +201,7 @@ refs, agg = get_k2_routed_models(
 | **Pre-flight (local)** | Probes Ollama connectivity and model availability before any API calls. Fails fast with clear message if Ollama is down or models missing. |
 | **Pre-flight (cloud)** | Validates `OLLAMA_API_KEY` is present. Fails fast if missing. |
 | **Reference layer** | Failed models logged and skipped. Pipeline requires **≥1 successful reference** to proceed. |
-| **Aggregator** | If aggregator fails, returns `success: false` with error details — never silently returns an error string as the answer. |
+| **Aggregator** | If aggregation fails, falls back to the longest successful reference response and returns `success: true` with `degraded: true` and the failure noted in `error`. A usable answer is always returned rather than a raw error string. |
 | **All layers** | 3 retry attempts with exponential backoff per model. |
 
 ---
@@ -202,6 +211,7 @@ refs, agg = get_k2_routed_models(
 ```json
 {
   "success": true,
+  "degraded": false,
   "response": "<synthesized final answer>",
   "models_used": {
     "reference": ["llama3.3", "qwen2.5", "mistral", "phi4"],

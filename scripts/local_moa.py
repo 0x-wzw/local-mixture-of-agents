@@ -25,7 +25,7 @@ from typing import Any, Dict, List, Optional
 
 import aiohttp
 
-__version__ = "3.1.0"
+__version__ = "3.2.0"
 
 __all__ = [
     "ollama_chat",
@@ -381,6 +381,9 @@ async def mixture_of_agents_local(
     Returns:
         {
             "success": bool,
+            "degraded": bool,   # True when the aggregator failed and a reference
+                                # response was used as a fallback (success stays True
+                                # because a usable answer is still returned).
             "response": str,
             "models_used": {"reference": [...], "aggregator": str},
             "reference_count": int,
@@ -395,6 +398,7 @@ async def mixture_of_agents_local(
         if not API_KEY:
             return {
                 "success": False,
+                "degraded": False,
                 "response": "OLLAMA_API_KEY not found. Set it in ~/.hermes/.env or as an environment variable.",
                 "models_used": {"reference": reference_models or REFERENCE_MODELS, "aggregator": None},
                 "reference_count": 0,
@@ -404,13 +408,13 @@ async def mixture_of_agents_local(
         # Use cloud defaults if none specified
         if reference_models is None:
             reference_models = _get_reference_models()
-        resolved_agg = aggregator_model if aggregator_model is not None else _get_aggregator_model()
     else:
         try:
             available = _check_local_ollama()
         except RuntimeError as e:
             return {
                 "success": False,
+                "degraded": False,
                 "response": str(e),
                 "models_used": {"reference": [], "aggregator": None},
                 "reference_count": 0,
@@ -423,7 +427,6 @@ async def mixture_of_agents_local(
         if len(resolved_refs) < len(reference_models):
             logger.info("Resolved %d/%d models", len(resolved_refs), len(reference_models))
         reference_models = resolved_refs
-        resolved_agg = aggregator_model if aggregator_model is not None else _get_aggregator_model()
 
     # K2 routing — overrides default model selection when enabled
     if use_k2_routing and reference_models is None:
@@ -453,6 +456,7 @@ async def mixture_of_agents_local(
             elapsed = round(time.perf_counter() - start, 2)
             return {
                 "success": False,
+                "degraded": False,
                 "response": "All reference models failed. Cannot proceed with aggregation.",
                 "models_used": {"reference": resolved_refs, "aggregator": None},
                 "reference_count": 0,
@@ -470,17 +474,19 @@ async def mixture_of_agents_local(
             fallback = max(references, key=len) if references else "No response available"
             return {
                 "success": True,
+                "degraded": True,
                 "response": fallback,
                 "models_used": {"reference": resolved_refs, "aggregator": agg_model_resolved},
                 "reference_count": len(references),
                 "processing_time": elapsed,
-                "error": f"Aggregator failed, used best reference fallback",
+                "error": "Aggregator failed, used best reference fallback",
             }
 
         elapsed = round(time.perf_counter() - start, 2)
         logger.info("MoA completed in %ss", elapsed)
         return {
             "success": True,
+            "degraded": False,
             "response": final,
             "models_used": {"reference": resolved_refs, "aggregator": agg_model_resolved},
             "reference_count": len(references),
